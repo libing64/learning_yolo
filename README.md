@@ -4,6 +4,9 @@ PyTorch re-implementation of YOLOv1 for PASCAL VOC 2007 + 2012, following
 [You Only Look Once](https://arxiv.org/abs/1506.02640) and the training /
 inference pipeline in [arXiv:2305.17786](https://arxiv.org/pdf/2305.17786v1).
 
+Also includes a pure-PyTorch **YOLOv3** package under [`yolo_v3/`](yolo_v3/)
+([paper](https://arxiv.org/abs/1804.02767), Darknet-53 + multi-scale; no Ultralytics models).
+
 ## Setup
 
 ```bash
@@ -17,9 +20,12 @@ VOC is downloaded to `~/dataset/VOC`:
 python -m yolo_v1.voc_download --root ~/dataset/VOC
 ```
 
+COCO 2017 for YOLOv3: `~/dataset/coco2017`.
+
 ## Train
 
 ```bash
+# --- YOLOv1 (VOC) ---
 # ImageNet-pretrained ResNet50 backbone (recommended)
 python train.py --data-root ~/dataset/VOC --model resnet50 --epochs 300 \
   --batch-size 32 --lr 1e-3 --backbone-lr-mult 0.2 --no-extra-aug \
@@ -29,7 +35,12 @@ python train.py --data-root ~/dataset/VOC --model resnet50 --epochs 300 \
 python train.py --data-root ~/dataset/VOC --model resnet18 --epochs 100 --batch-size 32 --output runs/yolov1_r18
 python train.py --data-root ~/dataset/VOC --model yolov1 --epochs 135 --batch-size 16
 python train.py --data-root ~/dataset/VOC --model tiny --epochs 200 --batch-size 32 --output runs/yolov1-tiny
+
+# --- YOLOv3 (COCO, pure PyTorch) ---
+python -m yolo_v3.train --data-root ~/dataset/coco2017 --model yolov3 \
+  --epochs 273 --batch-size 8 --image-size 416 --output runs/yolov3
 ```
+
 
 Training uses VOC 2007+2012 `trainval`, evaluates VOC 2007 `test` mAP (11-point),
 SGD + OneCycle, mixed precision, and the original YOLO multi-part SSE loss.
