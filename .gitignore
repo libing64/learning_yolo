@@ -5,11 +5,14 @@ __pycache__/
 .venv/
 
 checkpoints/
+weights/
 runs/
 outputs/
 *.pt
 *.pth
 *.tar
+*.conv.74
+
 
 .DS_Store
 .idea/

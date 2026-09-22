@@ -12,6 +12,7 @@ Paper COCO result (608×608, Darknet-53): **AP 33.0 / AP50 57.9**.
 ```
 yolo_v3/
   model.py      # Darknet-53 + 3-scale head (and YOLOv3-tiny)
+  darknet_weights.py  # load darknet53.conv.74 ImageNet backbone
   loss.py       # multi-scale BCE / MSE loss
   dataset.py    # COCO 2017 letterbox loader + multi-scale
   boxes.py      # decode + NMS
@@ -31,16 +32,28 @@ Uses local COCO 2017:
   train2017/  val2017/  annotations/instances_*.json
 ```
 
+## Pretrained Darknet-53
+
+Paper training starts from ImageNet-pretrained Darknet-53 (`darknet53.conv.74`):
+
+```bash
+# Already downloaded under weights/; re-convert if needed:
+python -m yolo_v3.darknet_weights \
+  --weights weights/darknet53.conv.74 \
+  --out weights/darknet53.pt
+```
+
 ## Train (paper-style)
 
 ```bash
 conda activate yolo
 cd /home/libing/source/ml/yolo/learning_yolo
 
-# Full YOLOv3 on COCO (multi-scale 320–608, cosine 273 epochs)
+# Full YOLOv3 on COCO (ImageNet backbone + multi-scale 320–608, cosine 273 epochs)
 python -m yolo_v3.train \
   --data-root ~/dataset/coco2017 \
   --model yolov3 \
+  --pretrained weights/darknet53.conv.74 \
   --epochs 273 \
   --batch-size 8 \
   --image-size 416 \
@@ -53,6 +66,7 @@ python -m yolo_v3.train --model tiny --batch-size 32 --output runs/yolov3-tiny
 
 Training matches the paper recipe at a high level:
 
+- **ImageNet-pretrained Darknet-53** backbone (`--pretrained`)
 - full images (letterbox), **no hard-negative mining**
 - **multi-scale** training (320…608, step 32)
 - color / flip augmentation + batch norm

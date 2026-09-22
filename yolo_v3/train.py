@@ -21,6 +21,7 @@ if str(ROOT) not in sys.path:
 
 from yolo_v3.boxes import decode_outputs, non_max_suppression
 from yolo_v3.config import YoloV3Config
+from yolo_v3.darknet_weights import load_pretrained_backbone
 from yolo_v3.dataset import CocoDetectionYolo, collate_fn
 from yolo_v3.loss import YOLOv3Loss
 from yolo_v3.metrics import contiguous_to_coco_id, evaluate_coco, predictions_to_coco
@@ -84,6 +85,11 @@ def parse_args():
     p.add_argument("--no-multi-scale", action="store_true")
     p.add_argument("--output", default="runs/yolov3")
     p.add_argument("--resume", default=None)
+    p.add_argument(
+        "--pretrained",
+        default=None,
+        help="Darknet-53 ImageNet weights: darknet53.conv.74 or converted .pt",
+    )
     p.add_argument("--eval-interval", type=int, default=5)
     p.add_argument("--log-interval", type=int, default=1)
     p.add_argument("--device", default="cuda")
@@ -106,6 +112,7 @@ def main():
         multi_scale=not args.no_multi_scale,
         output_dir=args.output,
         resume=args.resume,
+        pretrained_backbone=args.pretrained,
         eval_interval=args.eval_interval,
         seed=args.seed,
         device=args.device,
@@ -158,9 +165,12 @@ def main():
     )
 
     model = build_model(cfg).to(device)
+    if cfg.pretrained_backbone and not cfg.resume:
+        load_pretrained_backbone(model, cfg.pretrained_backbone)
     print(
         f"Model={cfg.model} params={count_parameters(model):.1f}M device={device} "
-        f"train={len(train_set)} val={len(val_set)}",
+        f"train={len(train_set)} val={len(val_set)}"
+        + (f" pretrained={cfg.pretrained_backbone}" if cfg.pretrained_backbone else ""),
         flush=True,
     )
 
