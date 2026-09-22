@@ -35,16 +35,31 @@ def set_seed(seed: int) -> None:
     torch.cuda.manual_seed_all(seed)
 
 
-def split_decay_params(model):
-    decay, no_decay = [], []
+def optimizer_param_groups(model, lr, weight_decay, backbone_lr_mult=0.1):
+    buckets = {
+        "backbone_decay": [],
+        "backbone_no_decay": [],
+        "head_decay": [],
+        "head_no_decay": [],
+    }
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
-        if param.ndim == 1 or name.endswith(".bias"):
-            no_decay.append(param)
-        else:
-            decay.append(param)
-    return decay, no_decay
+        is_backbone = name.startswith("backbone.")
+        no_decay = param.ndim == 1 or name.endswith(".bias")
+        prefix = "backbone" if is_backbone else "head"
+        buckets[f"{prefix}_{'no_decay' if no_decay else 'decay'}"].append(param)
+    specs = [
+        ("backbone_decay", lr * backbone_lr_mult, weight_decay),
+        ("backbone_no_decay", lr * backbone_lr_mult, 0.0),
+        ("head_decay", lr, weight_decay),
+        ("head_no_decay", lr, 0.0),
+    ]
+    groups = []
+    for key, group_lr, wd in specs:
+        if buckets[key]:
+            groups.append({"params": buckets[key], "lr": group_lr, "weight_decay": wd})
+    return groups
 
 
 def build_scheduler(optimizer, cfg: YoloConfig, steps_per_epoch: int):
@@ -52,9 +67,10 @@ def build_scheduler(optimizer, cfg: YoloConfig, steps_per_epoch: int):
     if name == "none":
         return None
     if name == "onecycle":
+        max_lr = [group["lr"] for group in optimizer.param_groups]
         return torch.optim.lr_scheduler.OneCycleLR(
             optimizer,
-            max_lr=cfg.lr,
+            max_lr=max_lr,
             epochs=cfg.epochs,
             steps_per_epoch=steps_per_epoch,
             pct_start=0.1,
@@ -119,7 +135,11 @@ def save_ckpt(path: Path, model, optimizer, scaler, scheduler, epoch, best_map, 
 def parse_args():
     p = argparse.ArgumentParser(description="Train YOLOv1 on PASCAL VOC 2007+2012")
     p.add_argument("--data-root", default=str(Path.home() / "dataset" / "VOC"))
-    p.add_argument("--model", default="yolov1", choices=["yolov1", "tiny"])
+    p.add_argument(
+        "--model",
+        default="yolov1",
+        choices=["yolov1", "tiny", "resnet18", "resnet34", "resnet50"],
+    )
     p.add_argument("--epochs", type=int, default=135)
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--lr", type=float, default=1e-3)
@@ -128,6 +148,18 @@ def parse_args():
     p.add_argument("--scheduler", default="onecycle")
     p.add_argument("--output", default="runs/yolov1")
     p.add_argument("--resume", default=None)
+    p.add_argument(
+        "--restart-lr",
+        action="store_true",
+        help="On resume, drop the old schedule and cosine-anneal from --lr over the remaining epochs.",
+    )
+    p.add_argument("--backbone-lr-mult", type=float, default=0.1)
+    p.add_argument(
+        "--target-map",
+        type=float,
+        default=None,
+        help="Stop early once validation mAP reaches this value.",
+    )
     p.add_argument("--no-amp", action="store_true")
     p.add_argument("--no-extra-aug", action="store_true")
     p.add_argument("--no-download", action="store_true")
@@ -162,8 +194,11 @@ def main():
         eval_interval=args.eval_interval,
         seed=args.seed,
         device=args.device,
+        backbone_lr_mult=args.backbone_lr_mult,
+        target_map=args.target_map,
     )
     log_interval = max(1, args.log_interval)
+    restart_lr = args.restart_lr
     set_seed(cfg.seed)
     torch.backends.cudnn.benchmark = True
     device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
@@ -223,15 +258,11 @@ def main():
     n_params = sum(p.numel() for p in model.parameters()) / 1e6
     print(f"Model={cfg.model} params={n_params:.1f}M device={device} train={len(train_set)} val={len(val_set)}")
 
-    decay, no_decay = split_decay_params(model)
-    optimizer = torch.optim.SGD(
-        [
-            {"params": decay, "weight_decay": cfg.weight_decay},
-            {"params": no_decay, "weight_decay": 0.0},
-        ],
-        lr=cfg.lr,
-        momentum=cfg.momentum,
-    )
+    groups = optimizer_param_groups(model, cfg.lr, cfg.weight_decay, cfg.backbone_lr_mult)
+    optimizer = torch.optim.SGD(groups, momentum=cfg.momentum)
+    base_lrs = [group["lr"] for group in optimizer.param_groups]
+    lrs = ", ".join(f"{lr:.2e}" for lr in base_lrs)
+    print(f"param groups={len(groups)} lrs=[{lrs}]")
     scaler = torch.amp.GradScaler("cuda", enabled=cfg.amp and device.type == "cuda")
     scheduler = build_scheduler(optimizer, cfg, steps_per_epoch=len(train_loader))
     criterion = YOLOv1Loss(cfg.S, cfg.B, cfg.C, cfg.lambda_coord, cfg.lambda_noobj)
@@ -246,7 +277,19 @@ def main():
             scaler.load_state_dict(ckpt["scaler"])
         start_epoch = ckpt["epoch"] + 1
         best_map = ckpt.get("best_map", -1.0)
-        if scheduler is not None and ckpt.get("scheduler"):
+        if restart_lr:
+            for group, base_lr in zip(optimizer.param_groups, base_lrs):
+                group["lr"] = base_lr
+                group["initial_lr"] = base_lr
+            remaining = max(1, cfg.epochs - start_epoch + 1)
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=remaining)
+            cfg.scheduler = "cosine"
+            print(
+                f"Restarted LR at [{', '.join(f'{lr:.2e}' for lr in base_lrs)}] "
+                f"with cosine over {remaining} epochs",
+                flush=True,
+            )
+        elif scheduler is not None and ckpt.get("scheduler"):
             scheduler.load_state_dict(ckpt["scheduler"])
         elif scheduler is not None and cfg.scheduler == "onecycle":
             # Rebuild so LR schedule continues from the resumed epoch.
@@ -316,7 +359,9 @@ def main():
             row["AP"] = {VOC_CLASSES[i]: aps[i] for i in range(len(aps))}
             if do_print:
                 print(
-                    f"Epoch {epoch}/{cfg.epochs}: train {train_stats['loss']:.3f}  "
+                    f"Epoch {epoch}/{cfg.epochs}: train {train_stats['loss']:.3f} "
+                    f"(coord {train_stats['coord']:.3f} obj {train_stats['obj']:.3f} "
+                    f"cls {train_stats['cls']:.3f})  "
                     f"val {val_stats['loss']:.3f}  mAP {mean_ap:.4f}  "
                     f"lr {row['lr']:.2e}  time {row['seconds']:.0f}s",
                     flush=True,
@@ -326,9 +371,23 @@ def main():
                 save_ckpt(
                     out_dir / "best.pt", model, optimizer, scaler, scheduler, epoch, best_map, cfg
                 )
+            if cfg.target_map is not None and mean_ap >= cfg.target_map:
+                print(
+                    f"Reached target mAP {mean_ap:.4f} >= {cfg.target_map:.4f} at epoch {epoch}",
+                    flush=True,
+                )
+                save_ckpt(
+                    out_dir / "last.pt", model, optimizer, scaler, scheduler, epoch, best_map, cfg
+                )
+                with log_path.open("a") as f:
+                    f.write(json.dumps(row) + "\n")
+                print(f"Done. best mAP={best_map:.4f}  checkpoints in {out_dir}", flush=True)
+                return
         elif do_print:
             print(
-                f"Epoch {epoch}/{cfg.epochs}: train {train_stats['loss']:.3f}  "
+                f"Epoch {epoch}/{cfg.epochs}: train {train_stats['loss']:.3f} "
+                f"(coord {train_stats['coord']:.3f} obj {train_stats['obj']:.3f} "
+                f"cls {train_stats['cls']:.3f})  "
                 f"lr {row['lr']:.2e}  time {row['seconds']:.0f}s",
                 flush=True,
             )

@@ -177,17 +177,18 @@ class ToTensor:
 
 
 def build_train_transforms(image_size=448, extra_aug=True, jitter=0.2):
-    ts = [ColorJitter(0.2, 0.5, 0.7, 0.07)]
+    # Match the original YOLO recipe by default: color jitter + scale/translate.
+    # Rotation / vertical flip are optional extras and often hurt VOC mAP.
+    ts = [
+        ColorJitter(0.2, 0.5, 0.7, 0.07),
+        RandomHorizontalFlip(0.5),
+    ]
     if extra_aug:
         ts += [
             RandomBlur(p=0.1),
             RandomGrayscale(p=0.1),
-        ]
-    ts += [RandomHorizontalFlip(0.5)]
-    if extra_aug:
-        ts += [
             RandomVerticalFlip(0.05),
-            RandomRotationJitter(p=0.5, degrees=8),
+            RandomRotationJitter(p=0.3, degrees=6),
         ]
     ts += [
         YOLOJitter(jitter=jitter),

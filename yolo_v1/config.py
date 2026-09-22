@@ -48,8 +48,11 @@ class YoloConfig:
     # From-scratch training uses BN (darknet yolov1.cfg) because ImageNet
     # pretraining from the original paper is skipped.
     batch_norm: bool = True
-    fc_hidden: int | None = None  # default: 4096 (full) / 2048 (tiny)
+    fc_hidden: int | None = None  # default: 4096 (full) / 2048 (tiny) / 512 (resnet18)
     dropout: float = 0.5
+    pretrained: bool = True
+    backbone_lr_mult: float = 0.1
+    target_map: float | None = None
 
     epochs: int = 135
     batch_size: int = 16
@@ -59,10 +62,12 @@ class YoloConfig:
     weight_decay: float = 5e-4
     scheduler: str = "onecycle"  # onecycle | cosine | original | none
     warmup_epochs: int = 5
-    grad_clip: float = 5.0
+    # Global norm is ~30 late in training; clipping at 5 was shrinking every step ~6x.
+    grad_clip: float = 100.0
     amp: bool = True
 
-    conf_thresh: float = 0.1
+    # VOC mAP needs the full precision-recall curve, so keep low-score boxes.
+    conf_thresh: float = 0.001
     nms_thresh: float = 0.5
     eval_interval: int = 10
 
@@ -83,4 +88,11 @@ class YoloConfig:
     def resolved_fc_hidden(self) -> int:
         if self.fc_hidden is not None:
             return self.fc_hidden
-        return 2048 if self.model == "tiny" else 4096
+        name = self.model.lower()
+        if name == "tiny":
+            return 2048
+        if name in {"resnet50", "yolov1-r50", "r50"}:
+            return 1024
+        if name in {"resnet18", "resnet34", "yolov1-r18", "r18"}:
+            return 512
+        return 4096
